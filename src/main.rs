@@ -17,6 +17,9 @@ struct Cli {
     /// Port to serve on
     #[arg(short, long, default_value = "8000")]
     port: u16,
+    /// Directory to serve files from
+    #[arg(short, long, default_value = ".")]
+    directory: String,
 }
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
@@ -25,7 +28,7 @@ fn main() -> std::io::Result<()> {
     match std::net::TcpListener::bind(&address) {
         Ok(listener) => {
             println!("Serving HTTP on {} ...", address);
-            let current_dir = Arc::new(std::env::current_dir()?);
+            let current_dir = Arc::new(PathBuf::from(cli.directory));
             let cache: FileCache = Arc::new(RwLock::new(HashMap::new()));
 
             let cache_clone = Arc::clone(&cache);
@@ -79,7 +82,7 @@ fn setup_file_watcher(base_dir: Arc<PathBuf>, cache: FileCache) {
                 let mut cache_guard = cache.write().unwrap();
                 for path in paths {
                     if let Some(extension) = path.extension() {
-                        if extension == "html" || extension == "css" || extension == "js" {
+                        if extension == "html" || extension == "css" || extension == "js"|| extension == "json" {
                             let relative_path = format!("/{}", path.strip_prefix(&*base_dir).unwrap_or(&path).to_string_lossy());
                             let now = Instant::now();
 
@@ -134,7 +137,7 @@ fn handle_client(
     let first_line = request.lines().next().unwrap_or("");
     let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or("");
-    let mut path = parts.next().unwrap_or("/");
+    let path = parts.next().unwrap_or("/");
 
     println!("Method: {}, File requested: {}", method, path);
 
@@ -142,17 +145,28 @@ fn handle_client(
         return respond_with_error(&mut stream, 405, "Method Not Allowed");
     }
 
-    path = if path == "/" { "/index.html" } else { path };
+    // Parse the path and query string
+    let (path_without_query, _) = match path.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (path, ""),
+    };
 
+    // Map root path "/" to "/index.html"
+    let final_path = if base_dir.join(&path_without_query[1..]).is_dir() {
+        format!("{}/index.html", path_without_query.trim_end_matches('/'))
+    } else {
+        path_without_query.to_string()
+    };
+    
     {
         let cache_guard = cache.read().unwrap();
-        if let Some((contents, mime_type)) = cache_guard.get(path) {
-            println!("Serving from cache: {}", path);
+        if let Some((contents, mime_type)) = cache_guard.get(&final_path) {
+            println!("Serving from cache: {}", final_path);
             return respond_with_file(&mut stream, contents, mime_type);
         }
     }
 
-    let file_path = base_dir.join(&path[1..]); // Remove leading '/'
+    let file_path = base_dir.join(&final_path[1..]); // Remove leading '/'
     
     if file_path.exists() && file_path.is_file() {
         let contents = fs::read(&file_path)?;
